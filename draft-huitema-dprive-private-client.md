@@ -57,208 +57,239 @@ and the IP address and port do not uniquely identify a service. In cloud or
 Content Delivery Networks (CDNs) solutions, a given platform hosts the services
 or servers of a lot of organizations, and looking up to what netblock
 an IP address belongs reveals little.  
+
 Progressive deployment of solutions like DNS in
-TLS (DTLS) {{?RFC7858}} and DNS over HTTPS (DoH) {{?RFC8484}} 
+TLS (DoT) {{?RFC7858}} and DNS over HTTPS (DoH) {{?RFC8484}} 
 mitigates the disclosure of DNS information. However, while these
 solutions hide the DNS traffic from on-path observers, the entire stream
 of queries from a given client is still available to the
-recursive servers that handle the clients' queries.
+recursive servers that handle the clients' queries. In (#minimum-disclo),
+we develop the argument that moving DNS requests to an off path
+resolver using DoH is only beneficial for privacy if the subsequent
+communications are encrypted and do not expose clear text metadata
+like the SNI. If such data is exposed, sending requests to an off path
+resolver merely enables additional privacy leaks to the off path resolver,
+without reducing leakage to the local network provider. It may
+provide some benefit if the local provider is not yet able to extract
+the information from packet headers and clear text metadata, but that
+benefit is only temporary.
+
 
 This document discusses strategies for reinforcing DNS privacy by minimizing
 the amount of information available to third parties.
 
 # Minimal Information Disclosure {#minimum-disclo}
 
-Most Internet exchanges are preceded by a  domain name resolution, which involves
-repeated queries to series of servers. Eventually, the resolution returns the
-IP address of the target, a connection to that target is established, and
-an application protocol runs over that connection. This process is bound to
-leak at least some data. The minimal set would be:
+DNS Privacy proponents are concerned that the DNS requests
+carry a large amount of privacy sensitive data {{?RFC7626}}. However,
+privacy sensitive data also leaks in IP packet headers and in clear
+text parameters found in data packets. Focusing on the DNS requests
+without considering the other leakages leads to imprecise
+policies:
 
-* The IP addresses in the packet headers, available to any observer of the
-  connection,
-  
-* The identify of the target service, available to the server hosting that
-  service.
+* In general, using the local resolver has no impact on privacy. If the
+local resolver is engaged in data collection through DNS, the local
+network is most probably also engaged in data collection through TCP
+dump or similar methods. The local resolver does
+not gain any information that the local network would not be able to
+obtain anyhow.
 
-DNS privacy leaks happen when observers obtain more information than the IP
-addresses in the packet headers. In particular, when the IP address does not
-identify the service, a privacy leak happens when the target service can be
-identified by other parties than the hosting server. Example of
-privacy leaks occuring today include:
+* In general, sending DNS to an off-path resolver is a net loss for
+privacy. The off-path resolver does not see IP headers, the content of
+clear-text application packets, or the SNI parameter in TLS packets. By
+getting the DNS stream, it acquires data that would otherwise only be
+visible to the local network. Even if the privacy policy of the off-path
+attacker is benign, this is a net privacy loss has the data is now
+available to two parties instead of just one.
 
-* DNS traffic in clear text revealing the IP address of the client and the
-  target domain name.
+* There is only an exception when the connection uses TLS and ESNI. In
+that case, the local network only sees the name of the public server.
+Hiding acquisition of ESNI record from the local network does help
+privacy, because it hides usage of the hidden server. 
 
-* DNS queries sent to a recursive resolver and logged by that resolver.
+The ESNI capable client can be expected to
+perform two series of requests for each connection:
 
-Our goal is to define name resolution strategies that minimize such privacy leaks.
+1) DNS queries to retrieve the ESNI information, or verify that
+no such information is available for the target server.
 
-# Key assumptions
+2) DNS queries to retrieve the IP address of the public server
+selected by the target, or the IP address of the target itself if
+ESNI will not be used.
 
-## IP address and identity
+We obtain minimal disclosure if:
 
-We have to assume that both the DNS server will be able to identify the client
-based on its IP address.
+1) The ESNI information or its absence is obtained in a privacy respecting way
+and cached at the client.
 
-When the DNS server is managed by the connectivity provider, we assume that
-the client's identity was provided as part of obtaining connectivity. There
-may be some networks where that is not the case, such as for example some
-permissive Wi-Fi hot spots, but these are more the exception than the rule.
+2) The IP address of the public server is obtained by DNS queries
+sent to the local resolver.
 
-When the DNS service is provided by an off path provider, we assume that the
-provider can link the client identity to the IP address of incoming queries.
-This is obvious when the off path provider manages multiple web services,
-and can obtain client login information on any of these services. Without
-that, we can expect the linkage between IP address and client identity to
-be obtained through web trackers and other such devices.
+Of course, the next question is whether the ESNI information can be obtained
+without leaking just as much privacy sensitive data. It is easy to envisage
+retrieval strategies that would not meet that requirement. For example,
+if every connection was preceded by an ESNI retrieval request to an off path
+server, the off path server would get as much information as if it was
+seeing all DNS requests. It is also clear that retrieving the ESNI data
+through the local server just prior to connecting to the public server
+will jeopardize the benefits of ESNI.
 
-## Central role of TLS and ESNI {#esni-central}
+## Minimal disclosure and hosting servers
 
-We assume that the client's traffic is encrypted, most likely using TLS.
-If the client traffic was not encrypted, examination of the clear text
-traffic would quickly reveal the nature and identity of the server.
+Before developing an ESNI data retrieval strategy, we make another
+observation related to minimal disclosure:
 
-We also assume that when using TLS, the client uses ESNI. If carried
-in clear text, the SNI would reveal the identity of the target server.
+* There is no addtional privacy leakage if the ESNI is retrieved from an
+off path resolver that also hosts the public server for the target.
 
-When the traffic is not encrypted, or when the SNI is carried in clear
-text, attempts at DNS privacy are futile. The safest attitude is to
-send queries to the default DNS resolver provisioned by the network.
-This is preferable to using an off-path resolver, because the network
-provided has access to network level data, while the off path DNS
-resolver does not. Sending queries off path would just leak that
-knowledge to the off-path resolver, without any privacy benefit.
+The public server of the target will be able to access the server name
+or the client IP address by observing the traffic to the hosted server,
+even if traffic and SNI are encrypted. If the public server supports
+DoH or DoT, it can process DNS requests for the target server while
+maintaining minimal disclosure.
 
-# Private DNS queries with SNI Encryption
+# Privacy Oriented ESNI Data Retrieval {#esni-retrieval}
 
-Clients that use SNI Encryption to contact a hidden server learn first the name
-of the fronting server that will accept connections on its behalf, and the
-cryptographic key used to encrypt the server name. The SNI Encryption specification
-{{?I-D.ietf-tls-esni}} defines an ESNI record in which the "public name"
-element conveys the name of the fronting server and the "ESNI Keys" elements
-convey public keys that can be used to encrypt the ESNI parameters. The
-ESNI record is typically published in the DNS, so the exchanges will work
-like that:
+We propose an ESNI retrieval data based on four options:
 
-1- Obtain the ESNI record for the hidden server, "hidden.example.com"
+1) If the ESNI data or its absence is cached and the cached data is
+not expired, there is no need for an additional query.
 
-2- Examine the ESNI record and retrieve the name of the fronting server,
-   "fronting.example.com"
+2) If the relation between target server and public server is known,
+and if the public server supports DoH or DoT, retrieve the ESNI data
+through that server.
 
-3- Resolve the name of the fronting server and find its IP address,
+3) If the public server is not known or cannot be accessed through DoH
+or DoT, retrieve the ESNI data through an off-path trusted resolver.
 
-4- Establish a TCP connection to the fronting server,
+4) Send gratuitous ESNI retrieval queries through the trusted resolver
+to diminish the value of DNS information logged at that resolver.
 
-5- Establish a TLS connection in which the "public" SNI is set to
-   the public server name, "fronting.example.com", but the ESNI
-   extension encodes the name of hidden server "hidden.example.com"
-   to which the fronting server will relay the connection.
+## Using cached data minimizes tracking {#esni-caches}
 
-Of course, if the client executes all these steps for each request,
-there will not be much privacy benefit, because the DNS request in step 1
-will disclose the client's interest in "hidden.example.com". But suppose
-instead that the client has performed the first step in advance and
-has cached the result. At that point, the various observers will only see:
+The strategy proposed in (#minimum-disclo) separates the retrieval of
+ESNI data and the establishment of connection. If ESNI data is cached,
+the off path resolvers will not see an ESNI query for each connection.
+If we assume that they cannot monitor the actual traffic, caching
+the ESNI data diminishes the predictive value of DNS logs maintained
+by the off-path resolvers.
 
-* A DNS request for "fronting.example.com",
+## Obtaining the relation between target and public server {#hosting-server}
 
-* A series of packets in which the IP destination is set to the
-  IP address of "fronting.example.com",
+The ESNI data includes the name of the public server. The data in the
+cache will become stale over time, but we can assume that the relation
+between target and public server will remain somewhat stable. Using
+stale values for the ESNI encryption keys would be dangerous, but
+the downside of using a stale relation is limited tot he privacy leak
+of the interest for the target server. If the DoH or DoT server
+provides a recursive resolver, the client will obtain the correct
+value of the ESNI data and learn the name of the up-to-date public
+server, correcting the previous misdirection.
 
-* and, a TLS connection in which the SNI is set to "fronting.example.com".
+The identification of the public server is not directly available
+when the target server does not support ESNI. In that case, ESNI
+data retrieval will fail. Even so, it is important to identify the
+hosting server of the target site. After the negative cache information
+of ESNI absence expires, we will minimize privacy disclosure if the
+subsequent query is sent to the DoH or DoT server managed by the
+hosting service.
 
-The IP addresses and the SNI parameters are visible to the local network
-provider. Sending a DNS query to the DNS server provisioned by that
-provider will not disclose any information that could not be gained
-by examining the traffic itself, which meets the requirement expressed
-in (#minimum-disco). This is true even if the DNS query is not encrypted.
+In many cases, the hosting service for a non ESNI supporting site can
+be infered from a CNAME lookup. For example, a CNAME request
+for "www.example.com" might return a response of the form
+"example.com.12345.cdn.example.net". The local software can
+notice that "cdn.example.net" designates a well known hosting service,
+for which a DoH server is available. The name
+of the hosting service may also be infered in other cases from the
+IP address of the target server, if that IP address belongs to a
+known address range of a known service.
 
-Sending the DNS Query to an alternative provider, in contrast, would
-create an additional disclosure to that provider. The alternative
-provider is usually not on-path, and thus does not have access to
-IP headers or packet contents.
+## Using a trusted off path resolver maintains ESNI privacy {#esni-off-path}
 
-In this ESNI scenario, we achieve our goal of privacy if the
-ESNI record was obtained and cached before the connection. This is
-often possible, but not always. The ESNI record may not be in the cache
-if this is the first contact with the hidden server, or if the time to
-live of the record expired since the previous contact. We
-have traded the difficult problem of hiding the real time DNS
-transaction for the related problem of hiding the specific DNS
-transactions that acquire the ESNI record.
+Retrieving the ESNI data or testing its absence through an off path
+resolver does provide information to that resolver, but still has
+privacy benefits compared to retrieving the information from a
+local resolver. If the client sends queries for ESNI data to a
+local resolver, the resolver can correlate later that with later
+requests for the public server. In contrast, the off-path resolver
+will not see the later requests to the public server.
 
-## Private acquisition of ESNI Records
+The privacy of this process can be augmented by adding "chaff" queries
+for target names picked at random. This would have limited value against
+a local resolver, because observing the traffic will reveal which
+DNS requests were followed by actual connections. But the off-path
+server does not have access to the traffic, and thus cannot simply
+differentiate chaff from grain.
 
-The acquisition of
-the ESNI record associated with the hidden service needs to be kept
-private, and also needs to be kept secure in order to avoid the fronting
-server spoofing attacks discussed in {{?I-D.ietf-tls-sniencryption}}.
-Using an encrypted DNS service like DoH or DTLS helps. It
-keeps the data out of sight of anyone but the selected resolver,
-and also provides some amount of protection against spoofing attacks.
+# Centralization considerations {#centralization}
 
-The first proposal would thus be:
+Experience in other areas such as e-mail services taught us that
+when infrastructure based services and off path services compete freely,
+a small number of centralized off-path services come to dominate the
+market. In the case of DNS, this could create a single point of
+attacks such as censorship or tracking. The currently competing off-path
+services appear willing to provide privacy and transparence guarantees,
+but they could still feel the pressure of various authorities. It is
+thus quite reasonable to be worried about centralization.
 
-1- If there is no ESNI record in the cache, obtain it
-   from a trusted DNS server using an encrypted transport like DoH or
-   DTLS.
+The strategy delineated in (#minimum-disclo) mitigates the centralization
+risk in two ways: it provides incentives for hosting servers to deploy
+their own DoH or DoT servers, thus ensuring some level of competition;
+and, it reduce the amount of data available to the potentially
+dominant centralized services.
 
-2- Examine the ESNI record and retrieve the name of the fronting server,
-   "fronting.example.com"
+The ESNI retrieval strategy presented in (#esni-retrieval) privileges
+sending requests for information about a target to the hosting provider
+of that target. Hosting providers will have reasonable incentives to
+provide a DoH or DoT service. The service will increase the reliability
+of their hosting service, and will also contribute to the
+indepence of that service from the competing off-path providers.
 
-3- Resolve the name of the fronting server and find its IP address
-   using the default resolver.
+The amount of data available to the centralized off-path providers will
+be limited to mostly ESNI data retrieval, which is somewhat less sensitive
+than the combination of ESNI data retrieval and real time connection
+information. If sufficient number of hosting providers support DoT or
+DoH, the centralized providers will only see a fraction of the ESNI
+data retrieval, which again reduces the data leakage. Finally, the
+insertion of "chaff" traffic will reduce the value of the data collected
+by the centralized services.
 
-4- Establish a TCP connection to the fronting server,
+# Security Considerations
 
-5- Establish a TLS connection in which the "public" SNI is set to
-   the public server name, "fronting.example.com", but the ESNI
-   extension encodes the name of hidden server "hidden.example.com"
-   to which the fronting server will relay the connection.
+The strategies presented in (#minimum-disclo) and (#esni-retrieval)
+are designed for minimal disruption of the current infrastructure
+of local resolvers. They can accomodate split DNS configurations
+that are common in enterprises, and can enable filtering of malware
+traffic.
 
-This approach provides some robust protections, but it runs all ESNI
-requests through an off path resolver, which is still a privacy
-issue. There are some options for mitigating this leakage of
-information:
+Many enterprises adopt "split DNS" configurations, in which the names
+of local servers are only visible from inside the enterprise network.
+Attempting to resolve these names through off path resolvers would
+leak these names outside the enterprise, which is a privacy violation.
+The strategy described in (#esni-retrieval) could accomodate a step
+in which, if the name is recognized as local, ESNI data is never
+retrieved, or only retrieved through a dedicated enterprise server.
 
-* The client may want to perform ESNI lookup for a variety of names,
-  not just the one names that it is looking for. If the 
-  resolver is off path and does not observe the packet exchanges,
-  it will not be able to distinguish the actual queries from
-  the cover queries.
+Nodes infected by malware need to contact the "command and control"
+server of the attacker, and for that rely on resolving a set of
+DNS names. Many local resolvers are programmed to intercept these
+queries, which can disrupt the botnet or enable detection
+of malware infections. The strategy described in (#minimum-disclo)
+will resolve non-ESNI traffic through the local resolver, and
+the filtering of malware will continue to work.
 
-* The server may be able to provide the client with updated copies of
-  the ESNI record. This will not help the first connection, but it
-  will increase the chances that the ESNI record is in the cache for
-  the next connection.
+Malware authors could attempt to use ESNI, but they will still
+need to expose the name of the public server. Responsible
+public services will normally attempt to detect malware and
+block them. Irresponsible services would probably be considered
+as enablers of the malware, and be blocked as such.
 
-* The client may be able to spread the ESNI lookup through several
-  trusted DNS servers, not just one. The spreading should be organized
-  saw that repeated queries for the same name are performed through the
-  same server, because otherwise the spreading will just manage to
-  duplicate the leaks on several servers.
+# IANA Considerations
 
-* The client may want to perform the initial ESNI lookups using
-  a VPN connection, a web proxy, or some onion routing system, thus
-  hiding its identity from the server.
+This draft does not require any IANA action.
 
-* The client may want to use off-line provisioning mechanisms to
-  install specific DNS records in the local cache, much like it
-  could add known IP addresses to a local /etc/host file.
-  
-## Managing DNS requests for clear text servers
- 
-We saw in (#esni-central) that when the server is accessed in clear text,
-or even when the server is using TLS but fails to use ESNI, then attempts
-at DNS privacy are not only futile but also somewhat counter-productive.
-There are cases when the client knows in advance that the connection
-will happen in clear text, in which case the policy is simple to
-implement. But when the client knows that the connection will happen
-over TLS, it needs to ascertain whether the connection will use ESNI
-or not.
 
-The recommendation is to use negative caching. 
+
 
 
 
